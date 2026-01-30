@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>주식 포트폴리오 분석기</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        :root { --primary: #2563eb; --bg: #f8fafc; --text: #1e293b; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; line-height: 1.5; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        header { text-align: center; margin-bottom: 30px; }
+        .upload-zone { background: white; border: 2px dashed #cbd5e1; padding: 40px; text-align: center; border-radius: 12px; cursor: pointer; transition: 0.3s; margin-bottom: 20px;}
+        .upload-zone:hover { border-color: var(--primary); background: #eff6ff; }
+        #status { margin-top: 15px; font-weight: bold; color: var(--primary); }
+        table { width: 100%; border-collapse: collapse; background: white; margin-top: 30px; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+        th, td { padding: 12px 15px; text-align: right; border-bottom: 1px solid #e2e8f0; }
+        th { background: #f1f5f9; font-weight: 600; text-align: center; }
+        td:first-child, td:nth-child(2), td:nth-child(3) { text-align: center; }
+        .row-domestic { background-color: #f0fdf4; font-weight: bold; }
+        .row-overseas { background-color: #fef2f2; font-weight: bold; }
+        .row-total { background-color: #eff6ff; font-weight: bold; font-size: 1.1em; }
+        .hidden { display: none; }
+        .console { background: #0f172a; color: #10b981; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 12px; max-height: 150px; overflow-y: auto; margin-top: 10px; }
+        .debug-log { background: #1e293b; color: #f8fafc; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>📊 포트폴리오 OCR 분석기</h1>
+        <p>주식 계좌 캡처 화면을 업로드하면 자동으로 상품을 분류하고 비중을 계산합니다.</p>
+    </header>
+
+    <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+        <span>이곳을 클릭하여 계좌 캡처 이미지를 업로드하세요 (여러 장 가능)</span>
+        <input type="file" id="fileInput" class="hidden" multiple accept="image/*">
+        <div id="status">대기 중...</div>
+    </div>
+
+    <div id="uiConsole">
+        <h3 style="color: #64748b;">🖥️ 시스템 콘솔 및 OCR 추출 결과</h3>
+        <div id="consoleLog" class="console">> 시스템 준비 완료...</div>
+        <div id="rawLog" class="debug-log hidden"></div>
+    </div>
+
+    <table id="resultTable" class="hidden">
+        <thead>
+            <tr>
+                <th>상품명</th>
+                <th>국가 구분</th>
+                <th>분류</th>
+                <th>수량</th>
+                <th>현재가</th>
+                <th>평가금</th>
+                <th>비중</th>
+            </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+        <tfoot id="tableFoot"></tfoot>
+    </table>
+</div>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const status = document.getElementById('status');
+    const consoleLog = document.getElementById('consoleLog');
+    const rawLog = document.getElementById('rawLog');
+    const resultTable = document.getElementById('resultTable');
+    const tableBody = document.getElementById('tableBody');
+    const tableFoot = document.getElementById('tableFoot');
+
+    const CONFIG = {
+        overseasKeywords: ['미국', '일본', 'S&P500', 'NASDAQ', 'VANGUARD', 'AGNC', '애플', 'CHANA', '베트남'],
+        assetTypes: [
+            { key: '리츠', val: '부동산(리츠)' },
+            { key: '채권', val: '채권형' },
+            { key: '금현물', val: '원자재' },
+            { key: '액티브', val: '액티브ETF' }
+        ],
+        excludeLines: ['관심그룹', '종목추가', '뉴스', '공시', '토론', '지연', '주문']
+    };
+
+    function logToUI(msg) {
+        const time = new Date().toLocaleTimeString();
+        consoleLog.innerHTML += `<div><span style="color: #94a3b8;">[${time}]</span> ${msg}</div>`;
+        consoleLog.scrollTop = consoleLog.scrollHeight;
+    }
+
+    fileInput.addEventListener('change', async (e) => {
+        const files = e.target.files;
+        if (files.length === 0) return;
+
+        logToUI(`${files.length}개의 파일 분석 시작...`);
+        rawLog.classList.remove('hidden');
+        let combinedResults = [];
+
+        for (const file of files) {
+            try {
+                const result = await Tesseract.recognize(file, 'kor+eng', {
+                    logger: m => {
+                        if (m.status === 'recognizing text') {
+                            status.innerText = `분석 중... (${(m.progress * 100).toFixed(0)}%)`;
+                        }
+                    }
+                });
+
+                const text = result.data.text;
+                rawLog.innerText += `\n--- [${file.name} 추출 결과] ---\n${text}\n`;
+                
+                const parsedData = parseOCRText(text);
+                combinedResults = [...combinedResults, ...parsedData];
+            } catch (err) {
+                logToUI(`<span style="color: #ef4444;">❌ OCR 에러: ${err.message}</span>`);
+            }
+        }
+
+        if (combinedResults.length > 0) {
+            renderEditableTable(combinedResults);
+            status.innerText = "분석 완료!";
+            resultTable.classList.remove('hidden');
+        } else {
+            status.innerText = "데이터를 찾지 못했습니다.";
+            logToUI("⚠️ 유효한 데이터를 추출하지 못했습니다.");
+        }
+    });
+
+    function parseOCRText(text) {
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+        const results = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            let line = lines[i];
+            if (CONFIG.excludeLines.some(k => line.includes(k))) continue;
+
+            // 종목명 판별: 한글/영문 비중이 높고 숫자가 적은 줄
+            const numCount = (line.match(/\d/g) || []).length;
+            if (numCount / line.length < 0.4) {
+                let name = line.replace(/[_-]/g, '').trim();
+                let qty = 0, price = 0;
+
+                // 다음 4줄까지 수량(주)과 가격(현재가) 탐색
+                for (let j = 1; j <= 4; j++) {
+                    if (i + j >= lines.length) break;
+                    const nextLine = lines[i + j].replace(/,/g, '');
+                    const numbers = nextLine.match(/\d+(\.\d+)?/g);
+
+                    if (numbers) {
+                        numbers.forEach(num => {
+                            const val = parseFloat(num);
+                            // 수량 후보 (통상 수백~수만 단위)
+                            if (val > 0 && val < 50000 && qty === 0) qty = val;
+                            // 가격 후보 (현재가)
+                            else if (val > 10 && price === 0) price = val;
+                        });
+                    }
+                }
+
+                if (qty > 0 || price > 0) {
+                    let country = CONFIG.overseasKeywords.some(k => name.toUpperCase().includes(k)) ? "해외" : "국내";
+                    let type = "주식형";
+                    for (const rule of CONFIG.assetTypes) {
+                        if (name.includes(rule.key)) { type = rule.val; break; }
+                    }
+                    results.push({ name, country, type, qty: Math.floor(qty), price });
+                    logToUI(`매칭 성공: ${name} (${qty}주, ${price}원)`);
+                }
+            }
+        }
+        return results;
+    }
+
+    function renderEditableTable(data) {
+        tableBody.innerHTML = "";
+        data.forEach(item => {
+            const evaluation = item.qty * item.price;
+            tableBody.innerHTML += `
+                <tr>
+                    <td contenteditable="true" oninput="updateAllTotals()">${item.name}</td>
+                    <td contenteditable="true" oninput="updateAllTotals()">${item.country}</td>
+                    <td contenteditable="true" oninput="updateAllTotals()">${item.type}</td>
+                    <td contenteditable="true" oninput="updateAllTotals()">${item.qty.toLocaleString()}</td>
+                    <td contenteditable="true" oninput="updateAllTotals()">${item.price.toLocaleString()}</td>
+                    <td class="eval-cell">${evaluation.toLocaleString()}</td>
+                    <td class="weight-cell">0%</td>
+                </tr>`;
+        });
+        updateAllTotals();
+    }
+
+    function updateAllTotals() {
+        let domSum = 0, osSum = 0;
+        const rows = document.querySelectorAll("#tableBody tr");
+
+        rows.forEach(row => {
+            const country = row.cells[1].innerText.trim();
+            const qty = parseFloat(row.cells[3].innerText.replace(/,/g, '')) || 0;
+            const price = parseFloat(row.cells[4].innerText.replace(/,/g, '')) || 0;
+            const eval = qty * price;
+            row.cells[5].innerText = eval.toLocaleString();
+            if (country === "해외") osSum += eval; else domSum += eval;
+        });
+
+        const total = domSum + osSum;
+        rows.forEach(row => {
+            const eval = parseFloat(row.cells[5].innerText.replace(/,/g, '')) || 0;
+            row.cells[6].innerText = total > 0 ? ((eval / total) * 100).toFixed(1) + "%" : "0%";
+        });
+
+        tableFoot.innerHTML = `
+            <tr class="row-domestic"><td colspan="5">국내 합계</td><td>${domSum.toLocaleString()}</td><td>${total > 0 ? ((domSum/total)*100).toFixed(1) : 0}%</td></tr>
+            <tr class="row-overseas"><td colspan="5">해외 합계</td><td>${osSum.toLocaleString()}</td><td>${total > 0 ? ((osSum/total)*100).toFixed(1) : 0}%</td></tr>
+            <tr class="row-total"><td colspan="5">전체 합계</td><td>${total.toLocaleString()}</td><td>100%</td></tr>
+        `;
+    }
+    
+    // 시스템 콘솔 출력 함수
+    function logToUI(msg) {
+        const consoleLog = document.getElementById('consoleLog');
+        const time = new Date().toLocaleTimeString();
+        consoleLog.innerHTML += `<div><span style="color: #94a3b8;">[${time}]</span> ${msg}</div>`;
+        consoleLog.scrollTop = consoleLog.scrollHeight;
+    }
+</script>
+
+</body>
+</html>
